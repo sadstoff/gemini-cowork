@@ -9,11 +9,15 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.parse
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
+
+from cowork_automation import _find_browser_exe, discover_installed_plugins
+from cowork_office import IMAGE_OCR_EXTENSIONS, OFFICE_EXTENSIONS
 
 CATEGORIES = {
     "Documents": {".pdf", ".doc", ".docx", ".txt", ".md", ".rtf", ".odt", ".xls", ".xlsx", ".csv", ".ppt", ".pptx"},
@@ -83,6 +87,7 @@ class CoworkStore:
         self.artifacts_file = self.data_dir / "artifacts.json"
         self.instructions_file = self.data_dir / "instructions.md"
         self.connectors_file = self.data_dir / "connectors.json"
+        self.schedules_file = self.data_dir / "schedules.json"
 
     def load_json(self, path: Path, default):
         if path.exists():
@@ -157,6 +162,12 @@ class CoworkStore:
 
     def save_connectors(self, items: list[dict]):
         self.save_json(self.connectors_file, items)
+
+    def get_schedules(self) -> list[dict]:
+        return self.load_json(self.schedules_file, [])
+
+    def save_schedules(self, items: list[dict]):
+        self.save_json(self.schedules_file, items)
 
 
 def is_safe_path(target: Path) -> bool:
@@ -289,7 +300,11 @@ def list_directory(dir_path: Path, rel_subpath: str = "", limit: int = 200) -> d
             "category": "Folder" if is_dir else categorize(p.suffix),
             "size_kb": 0 if is_dir else round(st.st_size / 1024, 2),
             "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime)),
-            "previewable": (not is_dir) and (p.suffix.lower() in TEXT_EXTENSIONS) and st.st_size <= 512 * 1024,
+            "previewable": (not is_dir) and (
+                p.suffix.lower() in TEXT_EXTENSIONS
+                or p.suffix.lower() in OFFICE_EXTENSIONS
+                or p.suffix.lower() in IMAGE_OCR_EXTENSIONS
+            ) and st.st_size <= 16 * 1024 * 1024,
         })
 
     rel_curr = "" if target == dir_path.resolve() else str(target.relative_to(dir_path)).replace("\\", "/")
@@ -457,8 +472,16 @@ def plan_moves(dir_path: Path, strategy: str, stale_days: int, custom_moves: lis
 
 def detect_sandbox_backends() -> dict:
     has_docker = bool(shutil.which("docker"))
-    has_wsl = bool(shutil.which("wsl") or (os.name == "nt" and Path(r"C:\Windows\System32\wsl.exe").exists()))
-    return {"docker": has_docker, "wsl": has_wsl}
+    has_wsl = False
+    wsl_exe = shutil.which("wsl") or (r"C:\Windows\System32\wsl.exe" if os.name == "nt" and Path(r"C:\Windows\System32\wsl.exe").exists() else "")
+    if wsl_exe:
+        try:
+            r = subprocess.run([wsl_exe, "-l", "-q"], capture_output=True, timeout=3)
+            out = r.stdout.decode("utf-16-le", errors="ignore").strip() or r.stdout.decode("utf-8", errors="ignore").strip()
+            has_wsl = r.returncode == 0 and bool(out)
+        except Exception:
+            has_wsl = False
+    return {"docker": has_docker, "wsl": has_wsl, "builtin": True}
 
 
 def _to_wsl_path(win_path: Path) -> str:
@@ -476,9 +499,9 @@ def run_in_sandbox(command: str, work_dir: Path | None = None, backend: str = "a
     backends = detect_sandbox_backends()
     chosen = backend
     if chosen == "auto":
-        chosen = "docker" if backends["docker"] else ("wsl" if backends["wsl"] else "none")
-    if chosen == "none" or not backends.get(chosen):
-        raise RuntimeError("No local sandbox backend available (neither docker nor wsl is installed).")
+        chosen = "docker" if backends["docker"] else ("wsl" if backends["wsl"] else "builtin")
+    if chosen != "builtin" and not backends.get(chosen):
+        raise RuntimeError(f"Requested sandbox backend '{chosen}' is not available on this host.")
 
     if chosen == "docker":
         docker_cmd = ["docker", "run", "--rm", "--network=none", "--memory=512m", "--cpus=1"]
@@ -495,30 +518,63 @@ def run_in_sandbox(command: str, work_dir: Path | None = None, backend: str = "a
             "stderr": res.stderr[-4000:],
         }
 
-    # WSL disposable /tmp/cowork-vm-XXXXXX sandbox
-    wsl_src = _to_wsl_path(work_dir) if (work_dir and copy_workspace) else ""
-    copy_step = (
-        f'if [ -d "{wsl_src}" ]; then cp -r "{wsl_src}/." "$SB/" 2>/dev/null || true; fi; '
-        if wsl_src
-        else ""
-    )
-    script = (
-        'set -e; '
-        'SB=$(mktemp -d /tmp/cowork-vm-XXXXXX); '
-        'trap "rm -rf \\"$SB\\"" EXIT; '
-        'cd "$SB"; '
-        f'{copy_step}'
-        f'{cmd}'
-    )
-    res = subprocess.run(["wsl.exe", "bash", "-lc", script], capture_output=True, text=True, timeout=45, encoding="utf-8", errors="replace")
-    return {
-        "backend": "wsl",
-        "isolated": True,
-        "network": "host-shared",
-        "returncode": res.returncode,
-        "stdout": res.stdout[-8000:],
-        "stderr": res.stderr[-4000:],
-    }
+    if chosen == "wsl":
+        wsl_src = _to_wsl_path(work_dir) if (work_dir and copy_workspace) else ""
+        copy_step = (
+            f'if [ -d "{wsl_src}" ]; then cp -r "{wsl_src}/." "$SB/" 2>/dev/null || true; fi; '
+            if wsl_src
+            else ""
+        )
+        script = (
+            'set -e; '
+            'SB=$(mktemp -d /tmp/cowork-vm-XXXXXX); '
+            'trap "rm -rf \\"$SB\\"" EXIT; '
+            'cd "$SB"; '
+            f'{copy_step}'
+            f'{cmd}'
+        )
+        res = subprocess.run(["wsl.exe", "bash", "-lc", script], capture_output=True, text=True, timeout=45, encoding="utf-8", errors="replace")
+        return {
+            "backend": "wsl",
+            "isolated": True,
+            "network": "host-shared",
+            "returncode": res.returncode,
+            "stdout": res.stdout[-8000:],
+            "stderr": res.stderr[-4000:],
+        }
+
+    # Out-of-the-box built-in temporary workspace sandbox (sanitized env, auto-cleanup)
+    with tempfile.TemporaryDirectory(prefix="cowork_vm_") as tmp_dir:
+        sb_dir = Path(tmp_dir)
+        if work_dir and copy_workspace and work_dir.exists():
+            for item in work_dir.iterdir():
+                dst = sb_dir / item.name
+                try:
+                    if item.is_dir():
+                        shutil.copytree(item, dst, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(item, dst)
+                except Exception:
+                    pass
+        safe_env = {
+            k: os.environ[k]
+            for k in ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
+            if k in os.environ
+        }
+        safe_env["TEMP"] = str(sb_dir)
+        safe_env["TMP"] = str(sb_dir)
+        safe_env["PYTHONIOENCODING"] = "utf-8"
+        safe_env["COWORK_SANDBOX"] = "1"
+        shell_cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd] if os.name == "nt" else ["sh", "-lc", cmd]
+        res = subprocess.run(shell_cmd, cwd=str(sb_dir), env=safe_env, capture_output=True, text=True, timeout=45, encoding="utf-8", errors="replace")
+        return {
+            "backend": "builtin",
+            "isolated": True,
+            "network": "host-shared",
+            "returncode": res.returncode,
+            "stdout": res.stdout[-8000:],
+            "stderr": res.stderr[-4000:],
+        }
 
 
 class _TextExtractor(html.parser.HTMLParser):
@@ -639,7 +695,15 @@ def build_state_payload(store: CoworkStore, extra: dict | None = None) -> dict:
         "task_presets": TASK_PRESETS,
         "instructions": store.get_instructions(),
         "connectors": store.get_connectors(include_secrets=False),
+        "schedules": store.get_schedules(),
+        "plugins": discover_installed_plugins(Path(__file__).resolve().parent.parent),
         "sandbox": detect_sandbox_backends(),
+        "capabilities": {
+            "office": True,
+            "ocr": True,
+            "browser": bool(_find_browser_exe()),
+            "computer_use": True,
+        },
         "artifacts": list(reversed(artifacts)),
         "quick_folders": get_quick_folders(),
         "active_listing": active_listing,
