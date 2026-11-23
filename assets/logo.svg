@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <defs>
+    <linearGradient id="coworkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4285F4"/>
+      <stop offset="50%" stop-color="#9B72CF"/>
+      <stop offset="100%" stop-color="#D96570"/>
+    </linearGradient>
+    <linearGradient id="folderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E8EAED"/>
+    </linearGradient>
+  </defs>
+  <!-- Background Badge -->
+  <rect x="4" y="4" width="40" height="40" rx="12" fill="url(#coworkGrad)"/>
+  
+  <!-- Folder Base -->
+  <path d="M12 16 L20 16 L23 19 L36 19 C37.1 19 38 19.9 38 21 L38 34 C38 35.1 37.1 36 36 36 L12 36 C10.9 36 10 35.1 10 34 L10 18 C10 16.9 10.9 16 12 16 Z" fill="url(#folderGrad)" opacity="0.95"/>
+  
+  <!-- Gemini Sparkle Overlay -->
+  <path d="M25 21 C25 24 22 26 22 26 C22 26 25 28 25 31 C25 28 28 26 28 26 C28 26 25 24 25 21 Z" fill="#4285F4"/>
+  <circle cx="31" cy="23" r="1.5" fill="#9B72CF"/>
+  <circle cx="18" cy="29" r="1.2" fill="#D96570"/>
+</svg>
