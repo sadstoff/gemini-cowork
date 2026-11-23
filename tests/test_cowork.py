@@ -202,16 +202,17 @@ class TestCoworkServer(unittest.TestCase):
             self.assertTrue((root / "_COWORK_BRIEF.md").exists())
             server.handle_call_tool("cowork_schedule_manage", {"action": "remove", "id": sid})
 
-            # 4. Browser Use (CDP on data: URL with click & DOM extract)
+            # 4. Browser Use (CDP on data: URL with self-correcting click fallback & DOM extract)
             r_br = server.handle_call_tool("cowork_browser_run", {
-                "url": "data:text/html,<title>CoworkTest</title><button id='b' onclick=\"document.getElementById('out').innerText='CLICKED_OK'\">Go</button><div id='out'>INIT</div>",
-                "steps": [{"action": "click", "selector": "#b"}, {"action": "wait", "seconds": 0.3}],
+                "url": "data:text/html,<title>CoworkTest</title><button onclick=\"document.getElementById('out').innerText='CLICKED_OK'\">Go</button><div id='out'>INIT</div>",
+                "steps": [{"action": "click", "selector": "#missing-btn", "text": "Go"}, {"action": "wait", "seconds": 0.3}],
                 "headless": True,
                 "directory_path": str(root),
             })
             self.assertFalse(r_br.get("isError", False), r_br["content"][0]["text"])
             br_data = json.loads(r_br["content"][0]["text"])
             self.assertIn("CLICKED_OK", br_data["text"])
+            self.assertEqual(br_data["steps"][1]["strategy"], "self_corrected_text")
             self.assertTrue((root / "_COWORK_BROWSER.png").exists())
 
             # 5. Image OCR (generate PNG with text and read via cowork_read_file)
