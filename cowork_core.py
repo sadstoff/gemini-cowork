@@ -1,11 +1,17 @@
 import csv
 import fnmatch
 import hashlib
+import html.parser
+import ipaddress
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
 import time
+import urllib.parse
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
@@ -76,6 +82,7 @@ class CoworkStore:
         self.last_scan_file = self.data_dir / "last_scan.json"
         self.artifacts_file = self.data_dir / "artifacts.json"
         self.instructions_file = self.data_dir / "instructions.md"
+        self.connectors_file = self.data_dir / "connectors.json"
 
     def load_json(self, path: Path, default):
         if path.exists():
@@ -133,6 +140,23 @@ class CoworkStore:
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         })
         self.save_json(self.artifacts_file, items[-40:])
+
+    def get_connectors(self, include_secrets: bool = False) -> list[dict]:
+        items = self.load_json(self.connectors_file, [])
+        if include_secrets:
+            return items
+        return [
+            {
+                "name": c.get("name", ""),
+                "service": c.get("service", "webhook"),
+                "url": c.get("url", ""),
+                "has_token": bool(c.get("token")),
+            }
+            for c in items
+        ]
+
+    def save_connectors(self, items: list[dict]):
+        self.save_json(self.connectors_file, items)
 
 
 def is_safe_path(target: Path) -> bool:
@@ -431,6 +455,164 @@ def plan_moves(dir_path: Path, strategy: str, stale_days: int, custom_moves: lis
     return planned
 
 
+def detect_sandbox_backends() -> dict:
+    has_docker = bool(shutil.which("docker"))
+    has_wsl = bool(shutil.which("wsl") or (os.name == "nt" and Path(r"C:\Windows\System32\wsl.exe").exists()))
+    return {"docker": has_docker, "wsl": has_wsl}
+
+
+def _to_wsl_path(win_path: Path) -> str:
+    s = str(win_path.resolve()).replace("\\", "/")
+    if len(s) >= 2 and s[1] == ":":
+        drive = s[0].lower()
+        return f"/mnt/{drive}{s[2:]}"
+    return s
+
+
+def run_in_sandbox(command: str, work_dir: Path | None = None, backend: str = "auto", copy_workspace: bool = True) -> dict:
+    cmd = (command or "").strip()
+    if not cmd:
+        raise ValueError("command is required.")
+    backends = detect_sandbox_backends()
+    chosen = backend
+    if chosen == "auto":
+        chosen = "docker" if backends["docker"] else ("wsl" if backends["wsl"] else "none")
+    if chosen == "none" or not backends.get(chosen):
+        raise RuntimeError("No local sandbox backend available (neither docker nor wsl is installed).")
+
+    if chosen == "docker":
+        docker_cmd = ["docker", "run", "--rm", "--network=none", "--memory=512m", "--cpus=1"]
+        if work_dir:
+            docker_cmd.extend(["-v", f"{work_dir.resolve()}:/workspace:ro", "-w", "/workspace"])
+        docker_cmd.extend(["python:3.12-slim", "sh", "-lc", cmd])
+        res = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=45, encoding="utf-8", errors="replace")
+        return {
+            "backend": "docker",
+            "isolated": True,
+            "network": "none",
+            "returncode": res.returncode,
+            "stdout": res.stdout[-8000:],
+            "stderr": res.stderr[-4000:],
+        }
+
+    # WSL disposable /tmp/cowork-vm-XXXXXX sandbox
+    wsl_src = _to_wsl_path(work_dir) if (work_dir and copy_workspace) else ""
+    copy_step = (
+        f'if [ -d "{wsl_src}" ]; then cp -r "{wsl_src}/." "$SB/" 2>/dev/null || true; fi; '
+        if wsl_src
+        else ""
+    )
+    script = (
+        'set -e; '
+        'SB=$(mktemp -d /tmp/cowork-vm-XXXXXX); '
+        'trap "rm -rf \\"$SB\\"" EXIT; '
+        'cd "$SB"; '
+        f'{copy_step}'
+        f'{cmd}'
+    )
+    res = subprocess.run(["wsl.exe", "bash", "-lc", script], capture_output=True, text=True, timeout=45, encoding="utf-8", errors="replace")
+    return {
+        "backend": "wsl",
+        "isolated": True,
+        "network": "host-shared",
+        "returncode": res.returncode,
+        "stdout": res.stdout[-8000:],
+        "stderr": res.stderr[-4000:],
+    }
+
+
+class _TextExtractor(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._skip = 0
+        self.title = ""
+        self._in_title = False
+        self.chunks: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        t = tag.lower()
+        if t in ("script", "style", "noscript", "svg"):
+            self._skip += 1
+        elif t == "title":
+            self._in_title = True
+
+    def handle_endtag(self, tag):
+        t = tag.lower()
+        if t in ("script", "style", "noscript", "svg") and self._skip > 0:
+            self._skip -= 1
+        elif t == "title":
+            self._in_title = False
+        elif t in ("p", "div", "li", "br", "h1", "h2", "h3", "h4", "tr"):
+            self.chunks.append("\n")
+
+    def handle_data(self, data):
+        if self._skip > 0:
+            return
+        if self._in_title:
+            self.title += data
+        txt = " ".join(data.split())
+        if txt:
+            self.chunks.append(txt + " ")
+
+
+def _validate_public_http_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Only http:// or https:// URLs are allowed.")
+    host = parsed.hostname
+    if host.lower() in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("Localhost/private addresses are blocked.")
+    try:
+        ip = ipaddress.ip_address(socket.gethostbyname(host))
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise ValueError(f"Private/internal IP blocked: {ip}")
+    except socket.gaierror:
+        pass
+    return parsed.geturl()
+
+
+def web_fetch_to_text(url: str, max_chars: int = 20000) -> dict:
+    clean_url = _validate_public_http_url(url)
+    req = urllib.request.Request(clean_url, headers={"User-Agent": "Cowork-Antigravity/1.0.2"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        ctype = resp.headers.get("Content-Type", "")
+        raw = resp.read(1024 * 1024)
+        charset = resp.headers.get_content_charset() or "utf-8"
+        text_raw = raw.decode(charset, errors="replace")
+
+    if "html" in ctype.lower() or "<html" in text_raw[:500].lower():
+        parser = _TextExtractor()
+        parser.feed(text_raw)
+        body = re.sub(r"\n{3,}", "\n\n", "".join(parser.chunks)).strip()
+        title = parser.title.strip() or clean_url
+    else:
+        body = text_raw.strip()
+        title = clean_url
+
+    return {
+        "url": clean_url,
+        "title": title,
+        "content_type": ctype,
+        "text": body[:max_chars],
+    }
+
+
+def call_connector(connector: dict, method: str = "POST", payload: dict | None = None) -> dict:
+    url = _validate_public_http_url(connector.get("url", ""))
+    headers = {"User-Agent": "Cowork-Antigravity/1.0.2", "Content-Type": "application/json"}
+    token = (connector.get("token") or "").strip()
+    service = connector.get("service", "webhook")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if service == "notion":
+        headers.setdefault("Notion-Version", "2022-06-28")
+    data = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8") if method.upper() != "GET" else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        body = resp.read(256 * 1024).decode("utf-8", errors="replace")
+        return {"status": resp.status, "body": body[:4000]}
+
+
 def build_state_payload(store: CoworkStore, extra: dict | None = None) -> dict:
     sess = store.get_session()
     batches = store.load_json(store.rollback_file, [])
@@ -456,6 +638,8 @@ def build_state_payload(store: CoworkStore, extra: dict | None = None) -> dict:
         "tasks": list(reversed(sess.get("tasks", [])[-15:])),
         "task_presets": TASK_PRESETS,
         "instructions": store.get_instructions(),
+        "connectors": store.get_connectors(include_secrets=False),
+        "sandbox": detect_sandbox_backends(),
         "artifacts": list(reversed(artifacts)),
         "quick_folders": get_quick_folders(),
         "active_listing": active_listing,
