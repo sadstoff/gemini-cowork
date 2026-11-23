@@ -1044,7 +1044,7 @@ def main():
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}, "resources": {}},
-                    "serverInfo": {"name": "gemini-cowork", "version": "3.2.0"},
+                    "serverInfo": {"name": "gemini-cowork", "version": "1.0.1"},
                 },
             })
         elif method == "notifications/initialized":
