@@ -81,7 +81,7 @@ interface CoworkState {
   dry_run_preview?: DryRunPreview | null;
 }
 
-const app = new App({ name: 'Cowork', version: '5.0.0' }, {});
+const app = new App({ name: 'Cowork', version: '1.0.1' }, {});
 
 let state: CoworkState = {
   mounts: [],
