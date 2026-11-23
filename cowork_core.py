@@ -566,14 +566,42 @@ def run_in_sandbox(command: str, work_dir: Path | None = None, backend: str = "a
         safe_env["PYTHONIOENCODING"] = "utf-8"
         safe_env["COWORK_SANDBOX"] = "1"
         shell_cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd] if os.name == "nt" else ["sh", "-lc", cmd]
-        res = subprocess.run(shell_cmd, cwd=str(sb_dir), env=safe_env, capture_output=True, text=True, timeout=45, encoding="utf-8", errors="replace")
+        job_applied = False
+        if os.name == "nt":
+            try:
+                import ctypes
+                k32 = ctypes.windll.kernel32
+                h_job = k32.CreateJobObjectW(None, None)
+                if h_job:
+                    proc = subprocess.Popen(shell_cmd, cwd=str(sb_dir), env=safe_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+                    k32.AssignProcessToJobObject(h_job, int(proc._handle))
+                    job_applied = True
+                    try:
+                        out_s, err_s = proc.communicate(timeout=45)
+                        rc = proc.returncode
+                    except subprocess.TimeoutExpired:
+                        k32.TerminateJobObject(h_job, 1)
+                        out_s, err_s = proc.communicate()
+                        rc = -1
+                    finally:
+                        k32.CloseHandle(h_job)
+                else:
+                    res = subprocess.run(shell_cmd, cwd=str(sb_dir), env=safe_env, capture_output=True, text=True, timeout=45, encoding="utf-8", errors="replace")
+                    out_s, err_s, rc = res.stdout, res.stderr, res.returncode
+            except Exception:
+                res = subprocess.run(shell_cmd, cwd=str(sb_dir), env=safe_env, capture_output=True, text=True, timeout=45, encoding="utf-8", errors="replace")
+                out_s, err_s, rc = res.stdout, res.stderr, res.returncode
+        else:
+            res = subprocess.run(shell_cmd, cwd=str(sb_dir), env=safe_env, capture_output=True, text=True, timeout=45, encoding="utf-8", errors="replace")
+            out_s, err_s, rc = res.stdout, res.stderr, res.returncode
         return {
             "backend": "builtin",
             "isolated": True,
+            "job_object": job_applied,
             "network": "host-shared",
-            "returncode": res.returncode,
-            "stdout": res.stdout[-8000:],
-            "stderr": res.stderr[-4000:],
+            "returncode": rc,
+            "stdout": (out_s or "")[-8000:],
+            "stderr": (err_s or "")[-4000:],
         }
 
 
