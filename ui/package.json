@@ -1,0 +1,13 @@
+{
+  "name": "gemini-cowork-ui",
+  "version": "3.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.1.2",
+    "esbuild": "^0.28.2"
+  }
+}
