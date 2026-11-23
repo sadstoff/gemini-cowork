@@ -451,7 +451,8 @@ function renderFilesBody(): string {
     <div class="content-scroll">${kpi}${undo}${listHtml}</div>
     ${showDrawer ? renderDrawer() : ''}
   </div>`;
-}\nfunction renderAutomationBody(): string {
+}
+function renderAutomationBody(): string {
   const rows = state.schedules.length
     ? state.schedules.map((s) => `<div class="card row-between">
         <div style="min-width:0;flex:1;">
