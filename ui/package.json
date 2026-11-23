@@ -1,6 +1,6 @@
 {
   "name": "gemini-cowork-ui",
-  "version": "3.5.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "scripts": {
