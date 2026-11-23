@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "cowork": {
+      "command": "python",
+      "args": [
+        "${PLUGIN_ROOT}/server.py",
+        "--data_dir=${PLUGIN_DATA}"
+      ],
+      "env": {
+        "PYTHONUTF8": "1"
+      }
+    }
+  }
+}
