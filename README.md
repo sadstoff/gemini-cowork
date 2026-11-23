@@ -1,59 +1,18 @@
-# Cowork for Antigravity
+# Gemini Cowork (v2.0.0)
 
-Autonomous Claude Cowork-style workspace teammate for Google Antigravity, with an Antigravity-native MCP App UI (`ui://cowork/app.html`).
+An Antigravity-native desktop & folder coworker plugin inspired by **Claude Cowork**, built with Python MCP + TypeScript MCP App UI.
 
-## Features
+## What's New in v2.0.0
+- **Out-of-the-Box Sandbox VM (`cowork_sandbox_exec`)**: Includes a built-in temporary isolated workspace sandbox (`builtin`) that works immediately on Windows without Docker or WSL, plus optional `docker` (`--network=none --memory=512m`) and `wsl` backends.
+- **Built-in Browser Use (`cowork_browser_run`)**: Interactive Edge/Chrome CDP automation with persistent profile (`browser_profile`), multi-step click/type/scroll/eval, DOM text extraction, and screenshot capture.
+- **Computer Use (`cowork_computer_use`)**: Desktop screen capture, window listing & focus, screen OCR text-finding (`find_text`), mouse clicks, typing, and hotkeys.
+- **Deep Office Formats & OCR (`cowork_read_file`, `cowork_office_create`)**: Read multi-page `.pdf` (including image OCR fallback), `.docx`, `.xlsx`, `.pptx`, and images (`.png`, `.jpg`, `.webp`), plus create `.docx`, `.xlsx`, and `.pptx` deliverables.
+- **Scheduled Tasks (`cowork_schedule_manage`)**: Background cron/interval scheduler for `triage`, `brief`, `dedupe`, `index`, `web_fetch`, and `sandbox_exec` with optional connector notifications.
+- **OAuth & Plugins Hub (`cowork_oauth_connect`, `cowork_plugins_list`)**: 1-click OAuth setup & connector management (Google, Slack, Notion, GitHub, Discord, Webhook) and discovery of installed Antigravity plugins.
+- **Redesigned 6-Tab UI**: `Files & Office`, `Tasks & Cron`, `Browser & Screen`, `Sandbox VM`, `OAuth & Plugins`, and `Artifacts & Rules`.
 
-- **Antigravity-Native Workspace UI**: Opens from the left sidebar (`Plugins -> Cowork`), the side-pane `+` menu, or inline in chat.
-- **Scoped Folder Access**: Mount folders via native folder picker or quick-mount chips with granular permission modes (`read_only`, `manual_approve`, `auto`). System roots and drive roots are blocked.
-- **1-Click Workflows**:
-  - **Folder Triage**: Scan files, preview category organization, and await approval.
-  - **Research Brief**: Summarize text/markdown/code files into `_COWORK_BRIEF.md`.
-  - **Duplicate Audit**: Exact SHA-256 duplicate detection (with fast head/mid/tail fingerprinting for large media files >16 MB) and safe isolation into `_Duplicates_Review`.
-  - **Generate Index**: Export `_COWORK_INDEX.md` and `_COWORK_SUMMARY.csv`.
-- **Safe Batch Organization & Clean Rollback**: Supports `by_category`, `by_date`, `archive_stale`, `dedupe_review`, `normalize_names`, and `custom` moves with dry-run previews and 1-click rollback (including empty-directory cleanup).
-- **Search, File Explorer & Preview**: Browse subfolders, search by filename/glob or text content, preview text files, or open them in Antigravity's editor pane.
-- **Persistent Instructions**: Save custom Cowork rules in `${PLUGIN_DATA}/instructions.md`.
-
-## What's New in v1.0.2
-
-- **Isolated Sandbox VM (`cowork_sandbox_exec`)**: Execute commands and scripts inside an isolated disposable Linux sandbox via **WSL** (`/tmp/cowork-vm-*` with auto-cleanup) or **Docker** (`--network=none --memory=512m`), without risking your host Windows environment.
-- **Web Fetch & Browser Integration (`cowork_web_fetch`)**: Fetch public `http(s)` pages or APIs, extract clean Markdown text directly into your mounted workspace artifacts, and pair with Antigravity's built-in `browser` subagent for interactive sites and forms.
-- **Service Connectors (`cowork_connector_manage`, `cowork_connector_send`)**: Connect Slack/Discord webhooks, Notion API, or custom REST endpoints (tokens stored locally in `${PLUGIN_DATA}/connectors.json`, never committed).
-
-## Requirements
-
-- **Python 3.10+** on `PATH` (zero external Python dependencies; uses standard library only).
-- **Node.js 18+** (only required if rebuilding `ui/cowork.html` from `ui/src/`).
-
-## Installation
-
-Copy or clone this directory into `~/.gemini/config/plugins/gemini-cowork`:
-
-```bash
-git clone https://github.com/sadstoff/gemini-cowork.git ~/.gemini/config/plugins/gemini-cowork
-```
-
-Antigravity discovers the plugin automatically without restarting.
-
-## Development & Building the UI
-
-`ui/cowork.html` is pre-bundled for zero-setup plugin installation. To modify and rebuild the UI:
-
-```bash
-cd ui
-npm install
-npm run build
-```
-
-## Testing
-
-Run the full unit and JSON-RPC integration test suite:
-
-```bash
+## Quick Start
+```powershell
 python -m unittest discover -s tests -v
+cd ui && npm install && npm run build
 ```
-
-## License
-
-[MIT](LICENSE)
