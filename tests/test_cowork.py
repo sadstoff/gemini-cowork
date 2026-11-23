@@ -102,6 +102,8 @@ class TestCoworkServer(unittest.TestCase):
                 {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "cowork_run_workflow", "arguments": {"workflow": "index", "directory_path": ws}}},
                 {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "cowork_app_save_instructions", "arguments": {"instructions": "Keep reports concise."}}},
                 {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "cowork_agent_turn", "arguments": {"prompt": "Что занимает больше всего места?", "directory_path": ws}}},
+                {"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "cowork_connector_manage", "arguments": {"action": "add", "name": "test-hook", "service": "slack", "url": "https://hooks.slack.com/services/T0/B0/XX"}}},
+                {"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "cowork_connector_manage", "arguments": {"action": "remove", "name": "test-hook"}}},
             ]
             res = run_rpc(reqs, td)
             for item in res:
@@ -112,6 +114,20 @@ class TestCoworkServer(unittest.TestCase):
             self.assertTrue((ws_p / "_COWORK_SUMMARY.csv").exists())
             self.assertEqual(res[8]["result"]["structuredContent"]["instructions"], "Keep reports concise.")
             self.assertEqual(len(res[9]["result"]["structuredContent"]["messages"]), 2)
+            self.assertEqual(len(res[10]["result"]["structuredContent"]["connectors"]), 1)
+            self.assertEqual(len(res[11]["result"]["structuredContent"]["connectors"]), 0)
+
+    def test_web_fetch_blocks_localhost_and_sandbox_exec(self):
+        with tempfile.TemporaryDirectory() as td:
+            res = run_rpc(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "cowork_web_fetch", "arguments": {"url": "http://127.0.0.1:8080/secret"}}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "cowork_web_fetch", "arguments": {"url": "file:///C:/Windows/win.ini"}}},
+                ],
+                td,
+            )
+            self.assertTrue(res[0]["result"].get("isError"))
+            self.assertTrue(res[1]["result"].get("isError"))
 
 
 if __name__ == "__main__":
