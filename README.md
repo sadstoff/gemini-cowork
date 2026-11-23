@@ -15,10 +15,11 @@ Autonomous Claude Cowork-style workspace teammate for Google Antigravity, with a
 - **Search, File Explorer & Preview**: Browse subfolders, search by filename/glob or text content, preview text files, or open them in Antigravity's editor pane.
 - **Persistent Instructions**: Save custom Cowork rules in `${PLUGIN_DATA}/instructions.md`.
 
-## Limitations & Differences from Claude Cowork
+## What's New in v1.0.2
 
-- **No built-in browser or external service connectors.** The original Claude Cowork can open websites, fill forms, and connect to Slack, Notion, or Gmail. This plugin is focused strictly on local files and folders on your computer.
-- **No isolated virtual machine (VM).** The original runs tasks inside a separate VM for full isolation, whereas this plugin operates directly on the local filesystem via Python (with programmatic blocking of system directories and drive roots).
+- **Isolated Sandbox VM (`cowork_sandbox_exec`)**: Execute commands and scripts inside an isolated disposable Linux sandbox via **WSL** (`/tmp/cowork-vm-*` with auto-cleanup) or **Docker** (`--network=none --memory=512m`), without risking your host Windows environment.
+- **Web Fetch & Browser Integration (`cowork_web_fetch`)**: Fetch public `http(s)` pages or APIs, extract clean Markdown text directly into your mounted workspace artifacts, and pair with Antigravity's built-in `browser` subagent for interactive sites and forms.
+- **Service Connectors (`cowork_connector_manage`, `cowork_connector_send`)**: Connect Slack/Discord webhooks, Notion API, or custom REST endpoints (tokens stored locally in `${PLUGIN_DATA}/connectors.json`, never committed).
 
 ## Requirements
 
