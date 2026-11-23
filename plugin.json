@@ -2,7 +2,7 @@
   "name": "gemini-cowork",
   "displayName": "Cowork",
   "description": "Claude Cowork-style autonomous teammate (v3.0) with its own interactive GUI: safe folder mounting, incremental execution plans, deep scan, search & file reading, dry-run sorting with manual approval, clean rollback, and index synthesis.",
-  "version": "3.0.0",
+  "version": "1.0.1",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Open the Cowork dashboard",

@@ -15,6 +15,11 @@ Autonomous Claude Cowork-style workspace teammate for Google Antigravity, with a
 - **Search, File Explorer & Preview**: Browse subfolders, search by filename/glob or text content, preview text files, or open them in Antigravity's editor pane.
 - **Persistent Instructions**: Save custom Cowork rules in `${PLUGIN_DATA}/instructions.md`.
 
+## Limitations & Differences from Claude Cowork
+
+- **No built-in browser or external service connectors.** The original Claude Cowork can open websites, fill forms, and connect to Slack, Notion, or Gmail. This plugin is focused strictly on local files and folders on your computer.
+- **No isolated virtual machine (VM).** The original runs tasks inside a separate VM for full isolation, whereas this plugin operates directly on the local filesystem via Python (with programmatic blocking of system directories and drive roots).
+
 ## Requirements
 
 - **Python 3.10+** on `PATH` (zero external Python dependencies; uses standard library only).
