@@ -9,6 +9,10 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SERVER_PATH = PLUGIN_ROOT / "server.py"
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
+import server
+from cowork_core import CoworkStore
 
 
 def run_rpc(requests: list[dict], data_dir: str) -> list[dict]:
@@ -128,6 +132,124 @@ class TestCoworkServer(unittest.TestCase):
             )
             self.assertTrue(res[0]["result"].get("isError"))
             self.assertTrue(res[1]["result"].get("isError"))
+
+    def test_v2_office_ocr_sandbox_cron_browser_computer_oauth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ws"
+            root.mkdir()
+            old_store = server.STORE
+            server.STORE = CoworkStore(Path(tmp) / "data")
+            self.addCleanup(setattr, server, "STORE", old_store)
+            server.handle_call_tool("cowork_mount_folder", {"directory_path": str(root), "permission_mode": "auto"})
+
+            # 1. Office creation & reading (.docx, .xlsx, .pptx)
+            r_doc = server.handle_call_tool("cowork_office_create", {
+                "directory_path": str(root),
+                "filename": "contract.docx",
+                "kind": "docx",
+                "title": "Service Agreement",
+                "content": "## Terms\n- Payment within 14 days",
+            })
+            self.assertFalse(r_doc.get("isError", False))
+            r_read_doc = server.handle_call_tool("cowork_read_file", {"file_path": str(root / "contract.docx")})
+            self.assertIn("Payment within 14 days", r_read_doc["content"][0]["text"])
+
+            r_xls = server.handle_call_tool("cowork_office_create", {
+                "directory_path": str(root),
+                "filename": "budget.xlsx",
+                "kind": "xlsx",
+                "title": "Budget",
+                "rows": [["Item", "Cost"], ["Server", 120]],
+            })
+            self.assertFalse(r_xls.get("isError", False))
+            r_read_xls = server.handle_call_tool("cowork_read_file", {"file_path": str(root / "budget.xlsx")})
+            self.assertIn("Server", r_read_xls["content"][0]["text"])
+
+            r_ppt = server.handle_call_tool("cowork_office_create", {
+                "directory_path": str(root),
+                "filename": "deck.pptx",
+                "kind": "pptx",
+                "title": "Q4 Deck",
+                "content": "# Agenda\nRevenue growth",
+            })
+            self.assertFalse(r_ppt.get("isError", False))
+            r_read_ppt = server.handle_call_tool("cowork_read_file", {"file_path": str(root / "deck.pptx")})
+            self.assertIn("Revenue growth", r_read_ppt["content"][0]["text"])
+
+            # 2. Out-of-the-box builtin sandbox
+            r_sb = server.handle_call_tool("cowork_sandbox_exec", {
+                "command": "echo COWORK_BUILTIN_OK",
+                "backend": "builtin",
+            })
+            self.assertFalse(r_sb.get("isError", False))
+            sb_data = json.loads(r_sb["content"][0]["text"])
+            self.assertEqual(sb_data["backend"], "builtin")
+            self.assertIn("COWORK_BUILTIN_OK", sb_data["stdout"])
+
+            # 3. Scheduled tasks (add, run_now, toggle, remove)
+            r_sched = server.handle_call_tool("cowork_schedule_manage", {
+                "action": "add",
+                "name": "Test Brief",
+                "workflow": "brief",
+                "cron": "0 20 * * *",
+                "directory_path": str(root),
+            })
+            scheds = json.loads(r_sched["content"][0]["text"])
+            self.assertEqual(len(scheds), 1)
+            sid = scheds[0]["id"]
+            r_run = server.handle_call_tool("cowork_schedule_manage", {"action": "run_now", "id": sid})
+            self.assertFalse(r_run.get("isError", False))
+            self.assertTrue((root / "_COWORK_BRIEF.md").exists())
+            server.handle_call_tool("cowork_schedule_manage", {"action": "remove", "id": sid})
+
+            # 4. Browser Use (CDP on data: URL with click & DOM extract)
+            r_br = server.handle_call_tool("cowork_browser_run", {
+                "url": "data:text/html,<title>CoworkTest</title><button id='b' onclick=\"document.getElementById('out').innerText='CLICKED_OK'\">Go</button><div id='out'>INIT</div>",
+                "steps": [{"action": "click", "selector": "#b"}, {"action": "wait", "seconds": 0.3}],
+                "headless": True,
+                "directory_path": str(root),
+            })
+            self.assertFalse(r_br.get("isError", False), r_br["content"][0]["text"])
+            br_data = json.loads(r_br["content"][0]["text"])
+            self.assertIn("CLICKED_OK", br_data["text"])
+            self.assertTrue((root / "_COWORK_BROWSER.png").exists())
+
+            # 5. Image OCR (generate PNG with text and read via cowork_read_file)
+            from PIL import Image, ImageDraw
+            img_p = root / "note.png"
+            im = Image.new("RGB", (320, 90), color=(255, 255, 255))
+            ImageDraw.Draw(im).text((20, 30), "COWORK 2026", fill=(0, 0, 0))
+            im.save(str(img_p))
+            r_ocr = server.handle_call_tool("cowork_read_file", {"file_path": str(img_p)})
+            self.assertFalse(r_ocr.get("isError", False))
+            self.assertIn("Image OCR", r_ocr["content"][0]["text"])
+            self.assertTrue(r_ocr["structuredContent"]["preview"].get("image_data_url", "").startswith("data:image/png;base64,"))
+
+            # 5b. Compound NL Command Bar pipeline (search + sandbox math + artifact)
+            (root / "receipt_oct_1.txt").write_text("Coffee 150.50\nTaxi 300", encoding="utf-8")
+            (root / "receipt_oct_2.txt").write_text("Lunch 249.50", encoding="utf-8")
+            r_nl = server.handle_call_tool("cowork_agent_turn", {
+                "prompt": "Найди все чеки за октябрь, посчитай сумму и отправь в Slack",
+                "directory_path": str(root),
+            })
+            self.assertFalse(r_nl.get("isError", False))
+            self.assertIn("700.0", r_nl["content"][0]["text"])
+            self.assertTrue((root / "_COWORK_NL_REPORT.md").exists())
+
+            # 6. Computer Use (list_windows & screenshot)
+            r_win = server.handle_call_tool("cowork_computer_use", {"action": "list_windows"})
+            self.assertFalse(r_win.get("isError", False))
+            r_shot = server.handle_call_tool("cowork_computer_use", {"action": "screenshot", "directory_path": str(root)})
+            if r_shot.get("isError"):
+                self.assertIn("screen capture unavailable", r_shot["content"][0]["text"].lower())
+            else:
+                self.assertTrue((root / "_COWORK_SCREEN.png").exists())
+
+            # 6. Plugins Hub & OAuth URL builder
+            r_pl = server.handle_call_tool("cowork_plugins_list", {})
+            self.assertFalse(r_pl.get("isError", False))
+            r_oa = server.handle_call_tool("cowork_oauth_connect", {"service": "google", "client_id": "test-cid"})
+            self.assertIn("accounts.google.com", r_oa["content"][0]["text"])
 
 
 if __name__ == "__main__":
