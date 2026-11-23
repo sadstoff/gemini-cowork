@@ -6,7 +6,7 @@ import {
 import { ICONS } from './icons';
 import { esc, renderRichPreview } from './preview';
 
-type Tab = 'files' | 'artifacts' | 'rules';
+type Tab = 'files' | 'artifacts' | 'sandbox' | 'rules';
 
 interface MountEntry {
   path: string;
@@ -69,30 +69,50 @@ interface SearchMatch {
   mtime: string;
 }
 
+interface ConnectorItem {
+  name: string;
+  service: string;
+  url: string;
+  has_token: boolean;
+}
+
+interface SandboxResult {
+  backend: string;
+  returncode: number;
+  stdout: string;
+  stderr: string;
+}
+
 interface CoworkState {
   mounts: MountEntry[];
   active_path: string;
   instructions: string;
+  connectors: ConnectorItem[];
+  sandbox: { docker: boolean; wsl: boolean };
   artifacts: ArtifactItem[];
   quick_folders: Array<{ label: string; path: string }>;
   active_listing: DirListing | null;
   rollback_batches: RollbackBatch[];
   last_scan: ScanResult | null;
   dry_run_preview?: DryRunPreview | null;
+  sandbox_result?: SandboxResult | null;
 }
 
-const app = new App({ name: 'Cowork', version: '1.0.1' }, {});
+const app = new App({ name: 'Cowork', version: '1.0.2' }, {});
 
 let state: CoworkState = {
   mounts: [],
   active_path: '',
   instructions: '',
+  connectors: [],
+  sandbox: { docker: false, wsl: false },
   artifacts: [],
   quick_folders: [],
   active_listing: null,
   rollback_batches: [],
   last_scan: null,
   dry_run_preview: null,
+  sandbox_result: null,
 };
 
 let tab: Tab = 'files';
@@ -106,6 +126,11 @@ let searchHits: SearchMatch[] | null = null;
 let queryText = '';
 let strategy = 'by_category';
 let rulesDraft = '';
+let sandboxCmd = 'uname -a && ls -la';
+let webUrl = '';
+let connName = '';
+let connService = 'webhook';
+let connUrl = '';
 
 const root = document.getElementById('app')!;
 
@@ -217,6 +242,9 @@ function renderSidebar(): string {
         <button class="sb-item ${tab === 'artifacts' ? 'active' : ''}" data-tab="artifacts">
           <span class="sb-item-l"><span class="muted">${ICONS.file}</span><span>Artifacts</span></span>
           <span class="small muted num">${state.artifacts.length}</span>
+        </button>
+        <button class="sb-item ${tab === 'sandbox' ? 'active' : ''}" data-tab="sandbox">
+          <span class="sb-item-l"><span class="muted">${ICONS.sparkles}</span><span>Sandbox &amp; Web</span></span>
         </button>
         <button class="sb-item ${tab === 'rules' ? 'active' : ''}" data-tab="rules">
           <span class="sb-item-l"><span class="muted">${ICONS.sliders}</span><span>Instructions</span></span>
@@ -365,6 +393,49 @@ function render() {
 
   let body = '';
   if (tab === 'artifacts') body = renderArtifactsBody();
+  else if (tab === 'sandbox') {
+    const sbOut = state.sandbox_result
+      ? `<pre class="code-box">[${esc(state.sandbox_result.backend)} · exit ${state.sandbox_result.returncode}]\n${esc(state.sandbox_result.stdout)}${state.sandbox_result.stderr ? '\n[stderr]\n' + esc(state.sandbox_result.stderr) : ''}</pre>`
+      : '';
+    const connRows = state.connectors.length
+      ? state.connectors.map((c) => `<div class="card row-between">
+          <div style="min-width:0;flex:1;"><strong>${esc(c.name)}</strong> <span class="small muted">(${esc(c.service)})</span><div class="small mono muted truncate">${esc(c.url)}</div></div>
+          <button class="btn btn-sm btn-danger" data-action="rm-conn" data-name="${esc(c.name)}">${ICONS.close}</button>
+        </div>`).join('')
+      : '<div class="small muted">No connectors configured.</div>';
+    body = `<div class="content-scroll" style="max-width:860px;">
+      <div class="card stack">
+        <div class="row-between"><strong>Isolated Sandbox VM</strong><span class="small muted">Docker: ${state.sandbox.docker ? 'Ready' : 'Off'} · WSL: ${state.sandbox.wsl ? 'Ready' : 'Off'}</span></div>
+        <div class="row">
+          <input id="sb-cmd" class="select mono" style="flex:1;" type="text" value="${esc(sandboxCmd)}" placeholder="Shell command to run in isolated /tmp VM..." />
+          <button class="btn btn-primary btn-sm" data-action="run-sb">Run in Sandbox</button>
+        </div>
+        ${sbOut}
+      </div>
+      <div class="card stack">
+        <strong>Web Fetch → Workspace Artifact</strong>
+        <div class="row">
+          <input id="web-url" class="select" style="flex:1;" type="text" value="${esc(webUrl)}" placeholder="https://example.com/docs" />
+          <button class="btn btn-sm" data-action="web-fetch">Fetch &amp; Save</button>
+        </div>
+      </div>
+      <div class="card stack">
+        <strong>Service Connectors (Slack / Notion / Webhook)</strong>
+        <div class="row">
+          <input id="conn-name" class="select" type="text" value="${esc(connName)}" placeholder="Name (e.g. slack-alerts)" />
+          <select id="conn-svc" class="select">
+            <option value="webhook" ${connService === 'webhook' ? 'selected' : ''}>Webhook</option>
+            <option value="slack" ${connService === 'slack' ? 'selected' : ''}>Slack</option>
+            <option value="notion" ${connService === 'notion' ? 'selected' : ''}>Notion</option>
+            <option value="discord" ${connService === 'discord' ? 'selected' : ''}>Discord</option>
+          </select>
+          <input id="conn-url" class="select" style="flex:1;" type="text" value="${esc(connUrl)}" placeholder="https://hooks.slack.com/..." />
+          <button class="btn btn-sm" data-action="add-conn">Add</button>
+        </div>
+        ${connRows}
+      </div>
+    </div>`;
+  }
   else if (tab === 'rules') {
     body = `<div class="content-scroll" style="max-width:760px;">
       <div class="row-between"><strong>Cowork Instructions</strong><button class="btn btn-primary btn-sm" data-action="save-rules">Save</button></div>
@@ -418,6 +489,11 @@ root.addEventListener('input', (e) => {
     if (inp) { inp.focus(); inp.setSelectionRange(pos, pos); }
   } else if (t.id === 'strat-sel') strategy = (t as HTMLSelectElement).value;
   else if (t.id === 'rules-box') rulesDraft = (t as HTMLTextAreaElement).value;
+  else if (t.id === 'sb-cmd') sandboxCmd = (t as HTMLInputElement).value;
+  else if (t.id === 'web-url') webUrl = (t as HTMLInputElement).value;
+  else if (t.id === 'conn-name') connName = (t as HTMLInputElement).value;
+  else if (t.id === 'conn-svc') connService = (t as HTMLSelectElement).value;
+  else if (t.id === 'conn-url') connUrl = (t as HTMLInputElement).value;
 });
 
 root.addEventListener('keydown', async (e) => {
@@ -467,6 +543,17 @@ root.addEventListener('click', async (e) => {
   else if (act === 'exec') await rpc('cowork_organize_files', { directory_path: state.active_path, strategy, dry_run: false, approved: true });
   else if (act === 'undo') await rpc('cowork_rollback', { batch_id: el.dataset.batch });
   else if (act === 'save-rules') await rpc('cowork_app_save_instructions', { instructions: rulesDraft });
+  else if (act === 'run-sb') await rpc('cowork_sandbox_exec', { command: sandboxCmd, directory_path: state.active_path, copy_workspace: false });
+  else if (act === 'web-fetch') {
+    if (!webUrl.trim()) return notify('Enter a URL first.', true);
+    await rpc('cowork_web_fetch', { url: webUrl.trim(), directory_path: state.active_path, save_as: state.active_path ? '_COWORK_WEB.md' : '' });
+  } else if (act === 'add-conn') {
+    if (!connName.trim() || !connUrl.trim()) return notify('Name and URL required.', true);
+    await rpc('cowork_connector_manage', { action: 'add', name: connName.trim(), service: connService, url: connUrl.trim() });
+    connName = ''; connUrl = '';
+  } else if (act === 'rm-conn' && el.dataset.name) {
+    await rpc('cowork_connector_manage', { action: 'remove', name: el.dataset.name });
+  }
 });
 
 app.ontoolinput = () => { busy = true; render(); };
