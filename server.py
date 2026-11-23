@@ -1,17 +1,28 @@
 import argparse
+import base64
 import csv
 import fnmatch
 import json
 import os
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
+from cowork_automation import (
+    OAUTH_PRESETS,
+    build_oauth_authorize_url,
+    compute_next_run,
+    discover_installed_plugins,
+    run_browser_session,
+    run_computer_action,
+)
 from cowork_core import (
     TEXT_EXTENSIONS,
     CoworkStore,
     build_state_payload,
+    call_connector,
     find_covering_mount,
     is_safe_path,
     is_within,
@@ -19,7 +30,15 @@ from cowork_core import (
     pick_folder_dialog,
     plan_moves,
     resolve_dir_arg,
+    run_in_sandbox,
     scan_folder,
+    web_fetch_to_text,
+)
+from cowork_office import (
+    IMAGE_OCR_EXTENSIONS,
+    OFFICE_EXTENSIONS,
+    create_office_file,
+    extract_rich_file_text,
 )
 
 APP_URI = "ui://cowork/app.html"
@@ -274,6 +293,147 @@ def handle_list_tools():
                     },
                 },
             },
+            {
+                "name": "cowork_sandbox_exec",
+                "description": "Execute a shell command or script inside an isolated sandbox (built-in out-of-the-box temp VM, Docker --network=none, or WSL /tmp VM) without risking the host environment.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "directory_path": {"type": "string"},
+                        "backend": {"type": "string", "enum": ["auto", "builtin", "wsl", "docker"], "default": "auto"},
+                        "copy_workspace": {"type": "boolean", "default": False},
+                    },
+                    "required": ["command"],
+                },
+            },
+            {
+                "name": "cowork_web_fetch",
+                "description": "Fetch a public http(s) webpage or JSON API, extract clean text, and optionally save it as a Markdown artifact in the mounted folder.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "directory_path": {"type": "string"},
+                        "save_as": {"type": "string", "description": "Optional filename inside the mounted folder (e.g. _COWORK_WEB.md)"},
+                    },
+                    "required": ["url"],
+                },
+            },
+            {
+                "name": "cowork_connector_manage",
+                "description": "List, add, or remove external service connectors (Slack webhook, Notion API, custom REST webhook).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "add", "remove"], "default": "list"},
+                        "name": {"type": "string"},
+                        "service": {"type": "string", "enum": ["slack", "notion", "discord", "webhook", "custom"], "default": "webhook"},
+                        "url": {"type": "string"},
+                        "token": {"type": "string"},
+                    },
+                },
+            },
+            {
+                "name": "cowork_connector_send",
+                "description": "Send a request or notification through a configured Cowork service connector.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "method": {"type": "string", "enum": ["POST", "GET"], "default": "POST"},
+                        "payload": {"type": "object"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "cowork_office_create",
+                "description": "Create a Word (.docx), Excel (.xlsx), or PowerPoint (.pptx) deliverable inside a mounted folder and register it as a Cowork Artifact.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "directory_path": {"type": "string"},
+                        "filename": {"type": "string"},
+                        "kind": {"type": "string", "enum": ["docx", "xlsx", "pptx"]},
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                        "rows": {"type": "array", "items": {"type": "array"}},
+                    },
+                    "required": ["filename", "kind"],
+                },
+            },
+            {
+                "name": "cowork_browser_run",
+                "description": "Run interactive browser automation (Edge/Chrome CDP with persistent profile): navigate, click, type, scroll, extract text, and capture screenshots.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "steps": {"type": "array", "items": {"type": "object"}},
+                        "headless": {"type": "boolean", "default": True},
+                        "save_screenshot": {"type": "boolean", "default": True},
+                        "directory_path": {"type": "string"},
+                    },
+                },
+            },
+            {
+                "name": "cowork_computer_use",
+                "description": "Control desktop applications via screenshots, window focus, OCR text-finding, mouse clicks, typing, and hotkeys.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["screenshot", "list_windows", "focus_window", "click", "double_click", "move", "type", "hotkey", "scroll", "find_text"]},
+                        "x": {"type": "integer"},
+                        "y": {"type": "integer"},
+                        "text": {"type": "string"},
+                        "keys": {"type": "array", "items": {"type": "string"}},
+                        "window_title": {"type": "string"},
+                        "scroll_amount": {"type": "integer"},
+                        "directory_path": {"type": "string"},
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "cowork_schedule_manage",
+                "description": "Manage background scheduled tasks (cron or interval_minutes) for triage, brief, dedupe, index, or web_fetch with optional connector notification.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "add", "toggle", "remove", "run_now"], "default": "list"},
+                        "id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "workflow": {"type": "string", "enum": ["triage", "brief", "dedupe", "index", "web_fetch", "sandbox_exec"], "default": "brief"},
+                        "cron": {"type": "string"},
+                        "interval_minutes": {"type": "integer", "default": 60},
+                        "directory_path": {"type": "string"},
+                        "target": {"type": "string"},
+                        "notify_connector": {"type": "string"},
+                    },
+                },
+            },
+            {
+                "name": "cowork_plugins_list",
+                "description": "Discover installed Antigravity plugins and their skills/MCP capabilities for Cowork coordination.",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "cowork_oauth_connect",
+                "description": "Generate/launch 1-click OAuth login flow or configure an authenticated service connector (Google, Slack, Notion, GitHub, Discord).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service": {"type": "string", "enum": ["google", "slack", "notion", "github", "discord", "webhook"]},
+                        "name": {"type": "string"},
+                        "client_id": {"type": "string"},
+                        "token": {"type": "string"},
+                        "url": {"type": "string"},
+                        "open_browser": {"type": "boolean", "default": False},
+                    },
+                    "required": ["service"],
+                },
+            },
             # App-only tools
             {
                 "name": "cowork_run_workflow",
@@ -461,7 +621,15 @@ def handle_call_tool(name: str, args: dict | None):
             doc_snippets = []
             for item in scan["all_files"][:40]:
                 fp = dir_path / item["rel_path"]
-                if fp.suffix.lower() in TEXT_EXTENSIONS and fp.stat().st_size <= 256 * 1024:
+                suf = fp.suffix.lower()
+                if suf in OFFICE_EXTENSIONS and fp.stat().st_size <= 8 * 1024 * 1024:
+                    try:
+                        _, rich_txt = extract_rich_file_text(fp, max_chars=600)
+                        excerpt = " ".join(rich_txt.splitlines()[1:6])[:220]
+                        doc_snippets.append((item["rel_path"], item["size_kb"], excerpt))
+                    except Exception:
+                        pass
+                elif suf in TEXT_EXTENSIONS and fp.stat().st_size <= 256 * 1024:
                     try:
                         lines = [ln.strip() for ln in fp.read_text(encoding="utf-8", errors="ignore").splitlines() if ln.strip()]
                         excerpt = " ".join(lines[:4])[:220]
@@ -627,6 +795,94 @@ def handle_call_tool(name: str, args: dict | None):
             moves = dry.get("planned_moves", 0)
             reply = f"Подготовил **dry-run** план для `{dir_path.name}` (стратегия `{strategy}`): **{moves}** перемещений. Проверь список ниже и нажми **Approve & Execute**, если всё ок."
             extra_state["dry_run_preview"] = dry
+        elif any(k in low for k in ["посчита", "сумм", "итог", "total", "sum", "чек", "счет", "счёт", "invoice", "receipt", "отправ"]):
+            # Compound NL pipeline: search files -> calculate in sandbox -> save artifact -> notify connector
+            syn_groups = [
+                ("чек", "receipt"),
+                ("счет", "счёт", "invoice"),
+                ("октябр", "oct"),
+                ("ноябр", "nov"),
+                ("декабр", "dec"),
+                ("январ", "jan"),
+            ]
+            keywords = []
+            for grp in syn_groups:
+                if any(g in low for g in grp):
+                    keywords.extend(grp)
+            matched_files = []
+            for p in dir_path.rglob("*"):
+                if not p.is_file() or p.name.startswith("_COWORK_"):
+                    continue
+                suf = p.suffix.lower()
+                if suf not in (TEXT_EXTENSIONS | OFFICE_EXTENSIONS | IMAGE_OCR_EXTENSIONS):
+                    continue
+                rel = str(p.relative_to(dir_path)).replace("\\", "/")
+                if not keywords or any(k in rel.lower() for k in keywords):
+                    matched_files.append(p)
+                elif suf in TEXT_EXTENSIONS and p.stat().st_size <= 256 * 1024:
+                    txt_low = p.read_text(encoding="utf-8", errors="ignore").lower()
+                    if any(k in txt_low for k in keywords):
+                        matched_files.append(p)
+            if not matched_files:
+                matched_files = [p for p in dir_path.rglob("*") if p.is_file() and not p.name.startswith("_COWORK_") and p.suffix.lower() in (TEXT_EXTENSIONS | OFFICE_EXTENSIONS)][:20]
+
+            extracted_chunks = []
+            for fp in matched_files[:20]:
+                try:
+                    if fp.suffix.lower() in (OFFICE_EXTENSIONS | IMAGE_OCR_EXTENSIONS):
+                        _, t = extract_rich_file_text(fp, max_chars=4000)
+                    else:
+                        t = fp.read_text(encoding="utf-8", errors="ignore")[:4000]
+                    extracted_chunks.append((fp.name, t))
+                except Exception:
+                    pass
+
+            # Calculate numeric totals inside isolated builtin sandbox (base64-safe across shells)
+            import re as _re
+            nums_per_file = []
+            for fname, txt in extracted_chunks:
+                found = [float(x.replace(",", ".")) for x in _re.findall(r"(?<!\d)(\d{1,7}(?:[.,]\d{1,2})?)(?!\d)", txt)]
+                amounts = [n for n in found if not (2020 <= n <= 2035 and n.is_integer())]
+                nums_per_file.append({"file": fname, "numbers": amounts[:20], "subtotal": round(sum(amounts), 2)})
+
+            b64_payload = base64.b64encode(json.dumps(nums_per_file, ensure_ascii=False).encode("utf-8")).decode("ascii")
+            sb_cmd = f"python -c \"import base64,json; d=json.loads(base64.b64decode('{b64_payload}')); print(json.dumps({{'files':len(d),'total':round(sum(x['subtotal'] for x in d),2)}}))\""
+            sb_res = run_in_sandbox(sb_cmd, backend="builtin", copy_workspace=False)
+            try:
+                calc = json.loads(sb_res.get("stdout", "{}").strip() or "{}")
+            except Exception:
+                calc = {"files": len(nums_per_file), "total": round(sum(x["subtotal"] for x in nums_per_file), 2)}
+
+            report_lines = [
+                f"# Cowork NL Report",
+                f"- **Query:** {prompt}",
+                f"- **Matched files:** {len(matched_files)}",
+                f"- **Sandbox total ({sb_res.get('backend', 'builtin')}):** **{calc.get('total', 0)}**",
+                "",
+                "## Breakdown",
+            ]
+            for item in nums_per_file:
+                report_lines.append(f"- `{item['file']}`: subtotal **{item['subtotal']}**")
+
+            # Check if user asked to send to a connector (Slack / Discord / Notion / Webhook)
+            conns = STORE.get_connectors(include_secrets=False)
+            target_conn = next((c for c in conns if c["service"].lower() in low or c["name"].lower() in low), None)
+            if not target_conn and any(w in low for w in ("отправ", "send", "slack", "discord", "notion", "webhook")) and conns:
+                target_conn = conns[0]
+
+            conn_note = ""
+            if target_conn:
+                send_res = handle_call_tool("cowork_connector_send", {"name": target_conn["name"], "payload": {"text": "\n".join(report_lines[:15])}})
+                conn_note = f"\n- **Connector `{target_conn['name']}`:** {'Sent!' if not send_res.get('isError') else send_res['content'][0]['text']}"
+            elif any(w in low for w in ("slack", "discord", "notion", "отправ", "send")):
+                conn_note = "\n- **Connector:** Не настроен. Добавь Slack/Discord/Webhook во вкладке **OAuth & Plugins**."
+
+            report_text = "\n".join(report_lines) + conn_note
+            rep_path = dir_path / "_COWORK_NL_REPORT.md"
+            rep_path.write_text(report_text, encoding="utf-8")
+            STORE.add_artifact("NL Command Report", str(rep_path), "MD", f"Total: {calc.get('total', 0)} ({len(matched_files)} files)")
+            STORE.append_audit("nl_pipeline", f"files={len(matched_files)}, total={calc.get('total', 0)}")
+            reply = report_text
         elif any(k in low for k in ["мест", "тяж", "больш", "размер", "largest", "heavy", "сколько", "что в", "скан", "scan"]):
             scan = scan_folder(dir_path, True, 90)
             top = scan.get("largest_files", [])[:6]
@@ -875,20 +1131,27 @@ def handle_call_tool(name: str, args: dict | None):
         start_line = max(1, int(args.get("start_line", 1)))
         end_line = max(start_line, int(args.get("end_line", start_line + 119)))
         try:
-            lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+            if fp.suffix.lower() in (OFFICE_EXTENSIONS | IMAGE_OCR_EXTENSIONS):
+                _, rich_text = extract_rich_file_text(fp)
+                lines = rich_text.splitlines()
+            else:
+                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
         except Exception as e:
             return tool_result(f"Failed to read file: {e}", is_error=True)
         sliced = lines[start_line - 1 : end_line]
         numbered = "\n".join(f"{start_line + i}: {line}" for i, line in enumerate(sliced))
         content = f"File: {fp.resolve()} (lines {start_line}-{min(end_line, len(lines))} of {len(lines)})\n\n{numbered}"
-        return tool_result(content, {
-            "preview": {
-                "path": str(fp.resolve()),
-                "name": fp.name,
-                "total_lines": len(lines),
-                "text": "\n".join(sliced),
-            }
-        })
+        preview_obj = {
+            "path": str(fp.resolve()),
+            "name": fp.name,
+            "total_lines": len(lines),
+            "text": "\n".join(sliced),
+        }
+        ext_low = fp.suffix.lower()
+        if ext_low in (IMAGE_OCR_EXTENSIONS | {".gif"}) and fp.stat().st_size <= 2 * 1024 * 1024:
+            mime = "jpeg" if ext_low in (".jpg", ".jpeg") else ext_low.lstrip(".")
+            preview_obj["image_data_url"] = f"data:image/{mime};base64,{base64.b64encode(fp.read_bytes()).decode('ascii')}"
+        return tool_result(content, {"preview": preview_obj})
 
     if name == "cowork_organize_files":
         dir_path, err = resolve_dir_arg(args, sess)
@@ -1019,7 +1282,294 @@ def handle_call_tool(name: str, args: dict | None):
         res_obj = {"ok": True, "markdown": str(md_path), "csv": str(csv_path), "total_files": data["total_files"]}
         return tool_result(json.dumps(res_obj, ensure_ascii=False), build_state_payload(STORE, {"view": "artifacts", "index_result": res_obj}))
 
+    if name == "cowork_sandbox_exec":
+        cmd = (args.get("command") or "").strip()
+        if not cmd:
+            return tool_result("command is required.", is_error=True)
+        work_dir = None
+        if args.get("directory_path") or sess.get("active_path"):
+            work_dir, err = resolve_dir_arg(args, sess)
+            if err:
+                return tool_result(err, is_error=True)
+        try:
+            res = run_in_sandbox(
+                cmd,
+                work_dir=work_dir,
+                backend=args.get("backend", "auto"),
+                copy_workspace=bool(args.get("copy_workspace", False)),
+            )
+            STORE.append_audit("sandbox_exec", f"[{res['backend']}] rc={res['returncode']}: {cmd[:80]}")
+            return tool_result(json.dumps(res, ensure_ascii=False, indent=2), build_state_payload(STORE, {"sandbox_result": res}))
+        except Exception as e:
+            return tool_result(str(e), is_error=True)
+
+    if name == "cowork_web_fetch":
+        url = (args.get("url") or "").strip()
+        if not url:
+            return tool_result("url is required.", is_error=True)
+        try:
+            fetched = web_fetch_to_text(url)
+        except Exception as e:
+            return tool_result(f"Web fetch failed: {e}", is_error=True)
+
+        save_as = (args.get("save_as") or "").strip()
+        if save_as:
+            dir_path, err = resolve_dir_arg(args, sess)
+            if err:
+                return tool_result(err, is_error=True)
+            mount = find_covering_mount(dir_path, sess)
+            if not mount or mount.get("permission_mode") == "read_only":
+                return tool_result("Cannot save artifact: folder must be mounted in manual_approve or auto mode.", is_error=True)
+            target = (dir_path / save_as.lstrip("/\\")).resolve()
+            if not is_within(target, dir_path):
+                return tool_result("Path traversal blocked.", is_error=True)
+            md_content = f"# {fetched['title']}\n- Source: {fetched['url']}\n\n{fetched['text']}\n"
+            target.write_text(md_content, encoding="utf-8")
+            STORE.add_artifact(fetched["title"][:60], str(target), "MD", f"Fetched from {fetched['url']}")
+            fetched["saved_path"] = str(target)
+
+        STORE.append_audit("web_fetch", f"{fetched['url']} ({len(fetched['text'])} chars)")
+        return tool_result(json.dumps(fetched, ensure_ascii=False, indent=2), build_state_payload(STORE, {
+            "preview": {
+                "path": fetched.get("saved_path", fetched["url"]),
+                "name": Path(fetched["saved_path"]).name if fetched.get("saved_path") else "web-fetch.md",
+                "total_lines": len(fetched["text"].splitlines()),
+                "text": fetched["text"],
+            }
+        }))
+
+    if name == "cowork_connector_manage":
+        action = args.get("action", "list")
+        items = STORE.get_connectors(include_secrets=True)
+        if action == "add":
+            cname = (args.get("name") or "").strip()
+            curl = (args.get("url") or "").strip()
+            if not cname or not curl:
+                return tool_result("name and url are required.", is_error=True)
+            items = [c for c in items if c.get("name", "").lower() != cname.lower()]
+            items.append({
+                "name": cname,
+                "service": args.get("service", "webhook"),
+                "url": curl,
+                "token": (args.get("token") or "").strip(),
+            })
+            STORE.save_connectors(items)
+            STORE.append_audit("connector_add", f"{cname} ({args.get('service', 'webhook')})")
+        elif action == "remove":
+            cname = (args.get("name") or "").strip()
+            items = [c for c in items if c.get("name", "").lower() != cname.lower()]
+            STORE.save_connectors(items)
+            STORE.append_audit("connector_remove", cname)
+        return tool_result(json.dumps(STORE.get_connectors(include_secrets=False), ensure_ascii=False), build_state_payload(STORE))
+
+    if name == "cowork_connector_send":
+        cname = (args.get("name") or "").strip()
+        items = STORE.get_connectors(include_secrets=True)
+        conn = next((c for c in items if c.get("name", "").lower() == cname.lower()), None)
+        if not conn:
+            return tool_result(f"Connector not found: {cname}", is_error=True)
+        try:
+            res = call_connector(conn, method=args.get("method", "POST"), payload=args.get("payload", {}))
+            STORE.append_audit("connector_send", f"{cname} -> HTTP {res['status']}")
+            return tool_result(json.dumps(res, ensure_ascii=False, indent=2), build_state_payload(STORE, {"connector_result": res}))
+        except Exception as e:
+            return tool_result(f"Connector call failed: {e}", is_error=True)
+
+    if name == "cowork_office_create":
+        dir_path, err = resolve_dir_arg(args, sess)
+        if err:
+            return tool_result(err, is_error=True)
+        mount = find_covering_mount(dir_path, sess)
+        if not mount or mount.get("permission_mode") == "read_only":
+            return tool_result("Folder must be mounted in manual_approve or auto mode.", is_error=True)
+        rel_name = (args.get("filename") or "").strip().lstrip("/\\")
+        if not rel_name:
+            return tool_result("filename is required.", is_error=True)
+        target = (dir_path / rel_name).resolve()
+        if not is_within(target, dir_path):
+            return tool_result("Path traversal blocked.", is_error=True)
+        try:
+            create_office_file(
+                target,
+                kind=args.get("kind", "docx"),
+                title=args.get("title", target.stem),
+                content=args.get("content", ""),
+                rows=args.get("rows"),
+            )
+            STORE.add_artifact(args.get("title") or target.name, str(target), args.get("kind", "docx").upper(), "Office deliverable")
+            STORE.append_audit("office_create", f"Created {target.name}")
+            return tool_result(json.dumps({"ok": True, "path": str(target)}, ensure_ascii=False), build_state_payload(STORE, {"view": "artifacts"}))
+        except Exception as e:
+            return tool_result(f"Office creation failed: {e}", is_error=True)
+
+    if name == "cowork_browser_run":
+        url = (args.get("url") or "").strip()
+        steps = args.get("steps") or []
+        headless = bool(args.get("headless", True))
+        save_shot = bool(args.get("save_screenshot", True))
+        shot_path = None
+        if save_shot:
+            base_dir = Path(args["directory_path"]).resolve() if args.get("directory_path") else (Path(sess["active_path"]) if sess.get("active_path") else (STORE.data_dir / "screenshots"))
+            shot_path = base_dir / "_COWORK_BROWSER.png"
+        try:
+            res = run_browser_session(
+                url=url,
+                steps=steps,
+                profile_dir=STORE.data_dir / "browser_profile",
+                screenshot_path=shot_path,
+                headless=headless,
+            )
+            STORE.append_audit("browser_run", f"{res.get('url', url)} ({len(res.get('steps', []))} steps)")
+            return tool_result(json.dumps(res, ensure_ascii=False, indent=2), build_state_payload(STORE, {"browser_result": res}))
+        except Exception as e:
+            return tool_result(f"Browser run failed: {e}", is_error=True)
+
+    if name == "cowork_computer_use":
+        act = args.get("action", "screenshot")
+        shot_path = None
+        if act == "screenshot":
+            base_dir = Path(args["directory_path"]).resolve() if args.get("directory_path") else (Path(sess["active_path"]) if sess.get("active_path") else (STORE.data_dir / "screenshots"))
+            shot_path = base_dir / "_COWORK_SCREEN.png"
+        try:
+            res = run_computer_action(
+                action=act,
+                x=args.get("x"),
+                y=args.get("y"),
+                text=args.get("text", ""),
+                keys=args.get("keys"),
+                window_title=args.get("window_title", ""),
+                scroll_amount=int(args.get("scroll_amount") or 0),
+                screenshot_path=shot_path,
+            )
+            STORE.append_audit("computer_use", f"{act}")
+            return tool_result(json.dumps(res, ensure_ascii=False, indent=2), build_state_payload(STORE, {"computer_result": res}))
+        except Exception as e:
+            return tool_result(f"Computer use failed: {e}", is_error=True)
+
+    if name == "cowork_schedule_manage":
+        action = args.get("action", "list")
+        items = STORE.get_schedules()
+        if action == "add":
+            sname = (args.get("name") or "").strip() or f"Task {len(items) + 1}"
+            wf = args.get("workflow", "brief")
+            cron_expr = (args.get("cron") or "").strip()
+            interval_m = int(args.get("interval_minutes") or 60)
+            nxt = compute_next_run(cron_expr, interval_m)
+            sid = f"sched_{int(time.time())}_{len(items)}"
+            items.append({
+                "id": sid,
+                "name": sname,
+                "workflow": wf,
+                "cron": cron_expr,
+                "interval_minutes": interval_m,
+                "directory_path": (args.get("directory_path") or sess.get("active_path", "")).strip(),
+                "target": (args.get("target") or "").strip(),
+                "notify_connector": (args.get("notify_connector") or "").strip(),
+                "enabled": True,
+                "last_run": "",
+                "next_run_ts": nxt,
+                "next_run": time.strftime("%Y-%m-%d %H:%M", time.localtime(nxt)),
+            })
+            STORE.save_schedules(items)
+            STORE.append_audit("schedule_add", f"{sname} ({wf})")
+        elif action == "toggle":
+            sid = args.get("id", "")
+            for s in items:
+                if s.get("id") == sid:
+                    s["enabled"] = not s.get("enabled", True)
+            STORE.save_schedules(items)
+        elif action == "remove":
+            sid = args.get("id", "")
+            items = [s for s in items if s.get("id") != sid]
+            STORE.save_schedules(items)
+            STORE.append_audit("schedule_remove", sid)
+        elif action == "run_now":
+            sid = args.get("id", "")
+            target_s = next((s for s in items if s.get("id") == sid), None)
+            if not target_s:
+                return tool_result(f"Schedule not found: {sid}", is_error=True)
+            out = _execute_schedule_item(target_s)
+            STORE.save_schedules(items)
+            return tool_result(json.dumps(out, ensure_ascii=False, indent=2), build_state_payload(STORE))
+        return tool_result(json.dumps(STORE.get_schedules(), ensure_ascii=False, indent=2), build_state_payload(STORE))
+
+    if name == "cowork_plugins_list":
+        plugins = discover_installed_plugins(PLUGIN_ROOT.parent)
+        return tool_result(json.dumps(plugins, ensure_ascii=False, indent=2), build_state_payload(STORE))
+
+    if name == "cowork_oauth_connect":
+        svc = (args.get("service") or "webhook").lower()
+        cname = (args.get("name") or f"{svc}-oauth").strip()
+        client_id = (args.get("client_id") or "").strip()
+        token = (args.get("token") or "").strip()
+        curl = (args.get("url") or "").strip()
+        preset = OAUTH_PRESETS.get(svc, {})
+        auth_url = build_oauth_authorize_url(svc, client_id) if (client_id and svc in OAUTH_PRESETS) else preset.get("login_url", "")
+        if args.get("open_browser") and auth_url:
+            run_browser_session(url=auth_url, headless=False)
+        if token or curl:
+            items = STORE.get_connectors(include_secrets=True)
+            items = [c for c in items if c.get("name", "").lower() != cname.lower()]
+            items.append({
+                "name": cname,
+                "service": svc,
+                "url": curl or preset.get("auth_url", "https://api.example.com"),
+                "token": token,
+            })
+            STORE.save_connectors(items)
+            STORE.append_audit("oauth_connect", f"{cname} ({svc})")
+        res = {"service": svc, "name": cname, "authorize_url": auth_url, "hint": preset.get("setup_hint", "")}
+        return tool_result(json.dumps(res, ensure_ascii=False, indent=2), build_state_payload(STORE, {"oauth_result": res}))
+
     return tool_result(f"Unknown tool: {name}", is_error=True)
+
+
+_SCHED_LOCK = threading.Lock()
+
+
+def _execute_schedule_item(item: dict) -> dict:
+    wf = item.get("workflow", "brief")
+    dp = item.get("directory_path", "")
+    target = item.get("target", "")
+    if wf in ("triage", "brief", "dedupe", "index"):
+        res = handle_call_tool("cowork_run_workflow", {"workflow": wf, "directory_path": dp})
+    elif wf == "web_fetch":
+        res = handle_call_tool("cowork_web_fetch", {"url": target, "directory_path": dp, "save_as": "_COWORK_WEB.md" if dp else ""})
+    elif wf == "sandbox_exec":
+        res = handle_call_tool("cowork_sandbox_exec", {"command": target, "directory_path": dp})
+    else:
+        res = tool_result(f"Unknown scheduled workflow: {wf}", is_error=True)
+    now = time.time()
+    item["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    nxt = compute_next_run(item.get("cron", ""), int(item.get("interval_minutes") or 60))
+    item["next_run_ts"] = nxt
+    item["next_run"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(nxt))
+    summary = res.get("content", [{}])[0].get("text", "")[:500]
+    conn_name = (item.get("notify_connector") or "").strip()
+    if conn_name:
+        try:
+            handle_call_tool("cowork_connector_send", {"name": conn_name, "payload": {"text": f"[Cowork Schedule: {item.get('name')}]\n{summary}"}})
+        except Exception:
+            pass
+    return {"id": item.get("id"), "ok": not res.get("isError", False), "summary": summary}
+
+
+def _scheduler_loop():
+    while True:
+        time.sleep(15)
+        try:
+            with _SCHED_LOCK:
+                items = STORE.get_schedules()
+                now = time.time()
+                changed = False
+                for item in items:
+                    if item.get("enabled", True) and now >= float(item.get("next_run_ts", 0)):
+                        _execute_schedule_item(item)
+                        changed = True
+                if changed:
+                    STORE.save_schedules(items)
+        except Exception:
+            pass
 
 
 def main():
@@ -1027,6 +1577,8 @@ def main():
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    t = threading.Thread(target=_scheduler_loop, daemon=True)
+    t.start()
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -1044,7 +1596,7 @@ def main():
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}, "resources": {}},
-                    "serverInfo": {"name": "gemini-cowork", "version": "1.0.1"},
+                    "serverInfo": {"name": "gemini-cowork", "version": "2.2.0"},
                 },
             })
         elif method == "notifications/initialized":
