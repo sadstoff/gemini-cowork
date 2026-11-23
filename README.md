@@ -1,8 +1,12 @@
-# Gemini Cowork (v2.0.0)
+# Gemini Cowork (v2.1.0)
 
 An Antigravity-native desktop & folder coworker plugin inspired by **Claude Cowork**, built with Python MCP + TypeScript MCP App UI.
 
-## What's New in v2.0.0
+## What's New in v2.1.0
+- **Natural-Language Command Bar (`cowork_agent_turn`)**: Ask in plain Russian/English (e.g. *«Найди все чеки за октябрь, посчитай сумму и отправь в Slack»*) — Cowork searches matching files, calculates totals in the isolated `builtin` sandbox, saves `_COWORK_NL_REPORT.md`, and dispatches to configured connectors.
+- **Full Rich Preview & 1-Click Export**: Renders Markdown headings/lists/code/tables, CSV/XLSX tables, inline images (`data:image/...`) alongside OCR text, and provides 1-click **Export** on artifacts and previews.
+
+## Highlights from v2.0.0
 - **Out-of-the-Box Sandbox VM (`cowork_sandbox_exec`)**: Includes a built-in temporary isolated workspace sandbox (`builtin`) that works immediately on Windows without Docker or WSL, plus optional `docker` (`--network=none --memory=512m`) and `wsl` backends.
 - **Built-in Browser Use (`cowork_browser_run`)**: Interactive Edge/Chrome CDP automation with persistent profile (`browser_profile`), multi-step click/type/scroll/eval, DOM text extraction, and screenshot capture.
 - **Computer Use (`cowork_computer_use`)**: Desktop screen capture, window listing & focus, screen OCR text-finding (`find_text`), mouse clicks, typing, and hotkeys.
